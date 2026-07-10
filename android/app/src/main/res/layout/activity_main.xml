@@ -28,14 +28,6 @@
         android:text="Inactive"
         android:textSize="18sp" />
 
-    <TextView
-        android:id="@+id/statsText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:textSize="12sp"
-        android:gravity="center" />
-
     <Button
         android:id="@+id/toggleButton"
         android:layout_width="wrap_content"

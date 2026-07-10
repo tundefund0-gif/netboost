@@ -1,6 +1,7 @@
 package netboost
 
 import org.xbill.DNS.*
+import java.io.DataInputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
@@ -12,8 +13,12 @@ class DnsResolver(
     private val useTls: Boolean = false
 ) {
     private val dnsCache = DnsCache()
-    private var statsHits = 0
-    private var statsMisses = 0
+    @Volatile
+    var statsHits = 0
+        private set
+    @Volatile
+    var statsMisses = 0
+        private set
 
     data class ResolveResult(
         val response: Message,
@@ -21,8 +26,8 @@ class DnsResolver(
     )
 
     fun resolve(query: Message): ResolveResult {
-        val question = query.getQuestion()
-        val cacheKey = buildCacheKey(question)
+        val q = query.getQuestion()
+        val cacheKey = "${q.name}:${q.type}:${q.dClass}"
 
         dnsCache.get(cacheKey)?.let {
             statsHits++
@@ -32,8 +37,7 @@ class DnsResolver(
         statsMisses++
         val response = if (useTls) resolveOverTls(query) else resolveOverUdp(query)
 
-        val answer = response.getSectionArray(Section.ANSWER)
-        if (answer.isNotEmpty()) {
+        if (response.getSectionArray(Section.ANSWER).isNotEmpty()) {
             dnsCache.put(cacheKey, CacheEntry(response, System.currentTimeMillis()))
         }
 
@@ -41,6 +45,11 @@ class DnsResolver(
     }
 
     fun getStats() = Pair(statsHits, statsMisses)
+
+    fun resetStats() {
+        statsHits = 0
+        statsMisses = 0
+    }
 
     private fun resolveOverUdp(query: Message): Message {
         val socket = DatagramSocket()
@@ -54,11 +63,15 @@ class DnsResolver(
         socket.send(packet)
 
         val buf = ByteArray(4096)
-        val response = DatagramPacket(buf, buf.size)
-        socket.receive(response)
+        val reply = DatagramPacket(buf, buf.size)
+        socket.receive(reply)
 
         socket.close()
-        return Message(response.data)
+
+        val len = reply.length
+        val data = ByteArray(len)
+        System.arraycopy(reply.data, reply.offset, data, 0, len)
+        return Message(data)
     }
 
     private fun resolveOverTls(query: Message): Message {
@@ -73,11 +86,10 @@ class DnsResolver(
         lenPrefixed[1] = queryBytes.size.toByte()
         System.arraycopy(queryBytes, 0, lenPrefixed, 2, queryBytes.size)
 
-        val out = socket.getOutputStream()
-        out.write(lenPrefixed)
-        out.flush()
+        socket.getOutputStream().write(lenPrefixed)
+        socket.getOutputStream().flush()
 
-        val input = java.io.DataInputStream(socket.getInputStream())
+        val input = DataInputStream(socket.getInputStream())
         val lenBuf = ByteArray(2)
         input.readFully(lenBuf)
         val responseLen = ((lenBuf[0].toInt() and 0xFF) shl 8) or (lenBuf[1].toInt() and 0xFF)
@@ -92,9 +104,5 @@ class DnsResolver(
 
         socket.close()
         return Message(responseBuf)
-    }
-
-    private fun buildCacheKey(question: Record): String {
-        return "${question.name}:${question.type}:${question.dClass}"
     }
 }

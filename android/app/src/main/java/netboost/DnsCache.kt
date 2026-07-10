@@ -1,6 +1,7 @@
 package netboost
 
 import org.xbill.DNS.Message
+import org.xbill.DNS.Section
 import java.util.LinkedHashMap
 
 data class CacheEntry(
@@ -16,28 +17,34 @@ class DnsCache(private val maxSize: Int = 10000) {
         }
     }
 
+    @Synchronized
     fun get(key: String): CacheEntry? {
-        return cache[key]?.takeIf { !isExpired(it) }
+        val entry = cache[key] ?: return null
+        if (isExpired(entry)) {
+            cache.remove(key)
+            return null
+        }
+        return entry
     }
 
+    @Synchronized
     fun put(key: String, entry: CacheEntry) {
         cache[key] = entry
     }
 
+    @Synchronized
     val size: Int get() = cache.size
-
-    fun clear() {
-        cache.clear()
-    }
 
     private fun isExpired(entry: CacheEntry): Boolean {
         val now = System.currentTimeMillis()
-        val allRecords = entry.response.getSectionArray(org.xbill.DNS.Section.ANSWER)
-            .plus(entry.response.getSectionArray(org.xbill.DNS.Section.ADDITIONAL))
-
-        val minTtl = allRecords.minOfOrNull { it.ttl * 1000L }
-            ?: (60 * 1000L)
-
+        val answerRecords = entry.response.getSectionArray(Section.ANSWER)
+        val additionalRecords = entry.response.getSectionArray(Section.ADDITIONAL)
+        val allRecords = answerRecords + additionalRecords
+        val minTtl = if (allRecords.isEmpty()) {
+            60_000L
+        } else {
+            allRecords.minOf { it.ttl * 1000L }
+        }
         return (now - entry.createdAt) > minTtl
     }
 }
