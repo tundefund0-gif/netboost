@@ -32,7 +32,6 @@ class DnsCache(private val maxSize: Int = 10000) {
         cache[key] = entry
     }
 
-    @Synchronized
     val size: Int get() = cache.size
 
     private fun isExpired(entry: CacheEntry): Boolean {
