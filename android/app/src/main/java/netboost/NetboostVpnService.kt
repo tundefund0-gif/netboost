@@ -21,7 +21,9 @@ class NetboostVpnService : VpnService() {
     private val running = AtomicBoolean(false)
     private var workerThread: Thread? = null
 
-    private val resolver = DnsResolver()
+    private val resolver = DnsResolver(
+        protectSocket = { socket -> protect(socket) }
+    )
 
     override fun onCreate() {
         super.onCreate()

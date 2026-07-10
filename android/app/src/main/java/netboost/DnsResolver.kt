@@ -10,7 +10,8 @@ import javax.net.ssl.SSLSocketFactory
 
 class DnsResolver(
     private val upstream: String = "1.1.1.1",
-    private val useTls: Boolean = false
+    private val useTls: Boolean = false,
+    private val protectSocket: ((java.net.DatagramSocket) -> Unit)? = null
 ) {
     private val dnsCache = DnsCache()
     @Volatile
@@ -53,6 +54,7 @@ class DnsResolver(
 
     private fun resolveOverUdp(query: Message): Message {
         val socket = DatagramSocket()
+        protectSocket?.invoke(socket)
         socket.soTimeout = 5000
         val queryBytes = query.toWire()
 

@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Netboost DNS</string>
+    <string name="app_name">Netboost</string>
+    <string name="app_description">DNS Cache &amp; Forwarder</string>
+    <string name="status_inactive">Inactive</string>
+    <string name="status_running">Running</string>
+    <string name="action_start">Start</string>
+    <string name="action_stop">Stop</string>
+    <string name="notification_channel">Netboost DNS</string>
 </resources>
