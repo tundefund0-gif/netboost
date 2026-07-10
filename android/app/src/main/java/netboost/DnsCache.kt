@@ -32,8 +32,8 @@ class DnsCache(private val maxSize: Int = 10000) {
 
     private fun isExpired(entry: CacheEntry): Boolean {
         val now = System.currentTimeMillis()
-        val allRecords = entry.response.sectionArray(org.xbill.DNS.Section.ANSWER)
-            .plus(entry.response.sectionArray(org.xbill.DNS.Section.ADDITIONAL))
+        val allRecords = entry.response.getSectionArray(org.xbill.DNS.Section.ANSWER)
+            .plus(entry.response.getSectionArray(org.xbill.DNS.Section.ADDITIONAL))
 
         val minTtl = allRecords.minOfOrNull { it.ttl * 1000L }
             ?: (60 * 1000L)

@@ -6,7 +6,6 @@ import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
-import kotlin.concurrent.thread
 
 class DnsResolver(
     private val upstream: String = "1.1.1.1",
@@ -22,7 +21,7 @@ class DnsResolver(
     )
 
     fun resolve(query: Message): ResolveResult {
-        val question = query.question
+        val question = query.getQuestion()
         val cacheKey = buildCacheKey(question)
 
         dnsCache.get(cacheKey)?.let {
@@ -95,7 +94,7 @@ class DnsResolver(
         return Message(responseBuf)
     }
 
-    private fun buildCacheKey(question: Question): String {
+    private fun buildCacheKey(question: Record): String {
         return "${question.name}:${question.type}:${question.dClass}"
     }
 }

@@ -12,6 +12,7 @@ import androidx.core.app.NotificationCompat
 import org.xbill.DNS.Message
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import kotlin.concurrent.thread
 
 class NetboostVpnService : VpnService() {
 
