@@ -1,0 +1,2 @@
+-keep class com.netboost.app.** { *; }
+-dontwarn com.netboost.app.**

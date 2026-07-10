@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="netboost_green">#FF4CAF50</color>
+    <color name="netboost_dark_green">#FF388E3C</color>
+    <color name="netboost_red">#FFF44336</color>
+    <color name="netboost_purple">#FF6200EE</color>
+    <color name="netboost_light_bg">#FFF5F5F5</color>
+    <color name="netboost_dark_bg">#FF121212</color>
+</resources>
