@@ -1,4 +1,4 @@
-netboost
+/netboost
 *.test
 *.out
 bench/
