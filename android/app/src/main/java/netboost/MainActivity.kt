@@ -1,13 +1,18 @@
 package netboost
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import android.os.Handler
-import android.os.Looper
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
 
@@ -46,21 +51,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        isRunning = NetboostVpnService::class.java.name.let {
-            val am = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
-            am.getRunningServices(Integer.MAX_VALUE).any { s ->
-                s.service.className == NetboostVpnService::class.java.name
-            }
-        }
+        isRunning = VpnService.prepare(this) == null
         updateUI()
 
         if (isRunning) {
-            updateRunnable = Runnable {
-                updateUI()
-                uiHandler.postDelayed(updateRunnable!!, 2000)
-            }
-            uiHandler.post(updateRunnable!!)
+            startStatsUpdates()
         }
+
+        requestNotificationPermission()
     }
 
     override fun onPause() {
@@ -82,11 +80,29 @@ class MainActivity : AppCompatActivity() {
         startForegroundService(Intent(this, NetboostVpnService::class.java))
         isRunning = true
         updateUI()
+        startStatsUpdates()
+    }
+
+    private fun startStatsUpdates() {
         updateRunnable = Runnable {
             updateUI()
             uiHandler.postDelayed(updateRunnable!!, 2000)
         }
         uiHandler.post(updateRunnable!!)
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    NOTIFICATION_PERMISSION_CODE
+                )
+            }
+        }
     }
 
     private fun updateUI() {
@@ -106,5 +122,6 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val VPN_REQUEST_CODE = 100
         private const val VPN_IP = "198.18.0.1"
+        private const val NOTIFICATION_PERMISSION_CODE = 200
     }
 }

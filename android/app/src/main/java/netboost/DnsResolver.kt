@@ -4,8 +4,8 @@ import org.xbill.DNS.*
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
-import javax.net.SocketFactory
 import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 import kotlin.concurrent.thread
 
 class DnsResolver(
@@ -63,7 +63,7 @@ class DnsResolver(
     }
 
     private fun resolveOverTls(query: Message): Message {
-        val factory = SocketFactory.getDefault()
+        val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
         val socket = factory.createSocket(upstream, 853) as SSLSocket
         socket.soTimeout = 5000
         socket.startHandshake()
