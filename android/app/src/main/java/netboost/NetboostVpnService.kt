@@ -26,34 +26,25 @@ class NetboostVpnService : VpnService() {
         super.onCreate()
         val c = NotificationChannel("n", "Netboost", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(c)
-        startForeground(1, note("Starting..."))
+        startForeground(1, note("Start"))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "S") { stop(); return START_NOT_STICKY }
         if (fd != null) return START_STICKY
-
         val ip = InetAddress.getByName("10.0.0.1")
         val b = Builder()
-        b.setSession("Netboost")
+        b.setSession("N")
         b.setMtu(1500)
         b.addAddress(ip, 24)
         b.addRoute(ip, 32)
         b.addDnsServer(ip)
-
         fd = b.establish()
-        if (fd == null) { note("VPN failed"); stopSelf(); return START_NOT_STICKY }
-
+        if (fd == null) { stopSelf(); return START_NOT_STICKY }
         running = true
-        note("Waiting for DNS...")
-
-        thread(name = "tun") { loop(fd!!) }
-
-        thread(name = "notif") {
-            while (running) {
-                try { note("${hits_}h ${misses_}m"); Thread.sleep(3000) } catch (_: Exception) { break }
-            }
-        }
+        note("Ready")
+        thread(name="t") { loop(fd!!) }
+        thread(name="n") { while(running){try{note("${hits_}h ${misses_}m");Thread.sleep(3000)}catch(_:Exception){break}} }
         return START_STICKY
     }
 
@@ -61,9 +52,9 @@ class NetboostVpnService : VpnService() {
 
     private fun stop() {
         running = false
-        try { fd?.close() } catch (_: Exception) {}
+        try { fd?.close() } catch(_: Exception) {}
         fd = null
-        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
+        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch(_: Exception) {}
         stopSelf()
     }
 
@@ -71,60 +62,79 @@ class NetboostVpnService : VpnService() {
         val input = FileInputStream(fd.fileDescriptor)
         val output = FileOutputStream(fd.fileDescriptor)
         val buf = ByteArray(65535)
-        val cache = LruCache<String, Message>(10000)
+        val rBuf = ByteArray(4096)
+        val cache = Array<CacheSlot?>(16384) { null }
+        val up = DatagramSocket()
+        protect(up)
+        up.soTimeout = 3000
+        val upAddr = InetSocketAddress("1.1.1.1", 53)
+        var pktCount = 0L
 
         while (running) {
             try {
                 val n = input.read(buf)
                 if (n <= 0) break
+                if ((buf[0].toInt() and 0xF0) != 0x40) continue
+                val ihl = (buf[0].toInt() and 0x0F) * 4
+                if (buf[9].toInt() != 17 || ihl < 20) continue
+                val uo = ihl
+                val dp = ((buf[uo+2].toInt() and 0xFF) shl 8) or (buf[uo+3].toInt() and 0xFF)
+                if (dp != 53) continue
+                val ul = ((buf[uo+4].toInt() and 0xFF) shl 8) or (buf[uo+5].toInt() and 0xFF)
+                val dl = ul - 8; if (dl <= 12) continue
+                var qnLen = 0
+                var qi = uo + 8 + 12
+                var hash = 0
+                while (qi < uo + 8 + dl) {
+                    val l = buf[qi].toInt() and 0xFF
+                    if (l == 0) { qnLen = qi - (uo + 8) + 1; break }
+                    hash = hash * 31 + l
+                    qi++
+                    for (j in 0 until l) {
+                        val b = buf[qi + j].toInt() and 0xFF
+                        hash = hash * 31 + b
+                    }
+                    qi += l
+                }
+                if (qnLen == 0) continue
+                val qtype = ((buf[qi+1].toInt() and 0xFF) shl 8) or (buf[qi+2].toInt() and 0xFF)
+                val key = (hash xor qtype) and 0x7FFFFFFF
 
-                if (buf[0].toInt() != 0x45) continue
-                val ihl = 20
-                if (buf[9].toInt() != 17) continue
+                val si = key % 16384
+                var hit: ByteArray? = null
+                var ci = si
+                var emptySlot = si
+                var foundEmpty = false
+                for (j in 0 until 32) {
+                    val idx = (si + j) % 16384
+                    val s = cache[idx]
+                    if (s == null) { if (!foundEmpty) { emptySlot = idx; foundEmpty = true }; continue }
+                    if (s.key == key) { hit = s.data; ci = idx; break }
+                }
+                if (hit == null && foundEmpty) ci = emptySlot
 
-                val udpOff = ihl
-                val dport = ((buf[udpOff+2].toInt() and 0xFF) shl 8) or (buf[udpOff+3].toInt() and 0xFF)
-                if (dport != 53) continue
-
-                val udpLen = ((buf[udpOff+4].toInt() and 0xFF) shl 8) or (buf[udpOff+5].toInt() and 0xFF)
-                val dnsLen = udpLen - 8
-                if (dnsLen <= 0) continue
-
-                val qb = ByteArray(dnsLen)
-                System.arraycopy(buf, udpOff + 8, qb, 0, dnsLen)
-                val query = Message(qb)
-                val q = query.getQuestion()
-                val key = q.name.toString() + q.type
-
-                val cached = cache.get(key)
-                val respMsg: Message
-                if (cached != null) {
-                    hits_++
-                    respMsg = cached
+                val rw: ByteArray
+                if (hit != null) {
+                    hits_++; rw = hit
                 } else {
                     misses_++
-                    val sock = DatagramSocket()
-                    protect(sock)
-                    sock.soTimeout = 5000
-                    val wire = query.toWire()
-                    sock.send(DatagramPacket(wire, wire.size, InetSocketAddress("1.1.1.1", 53)))
-                    val rb = ByteArray(4096)
-                    val rp = DatagramPacket(rb, rb.size)
-                    sock.receive(rp)
-                    sock.close()
+                    val wire = ByteArray(dl)
+                    System.arraycopy(buf, uo + 8, wire, 0, dl)
+                    up.send(DatagramPacket(wire, wire.size, upAddr))
+                    val rp = DatagramPacket(rBuf, rBuf.size)
+                    up.receive(rp)
                     val rd = ByteArray(rp.length)
                     System.arraycopy(rp.data, rp.offset, rd, 0, rp.length)
-                    val parsed = Message(rd)
-                    respMsg = parsed
-                    if (parsed.getSectionArray(Section.ANSWER).isNotEmpty())
-                        cache.put(key, parsed)
+                    rw = rd
+                    val answerSec = ((rd[6].toInt() and 0xFF) shl 8) or (rd[7].toInt() and 0xFF)
+                    if (answerSec > 0) {
+                        cache[ci] = CacheSlot(key, rd)
+                    }
                 }
 
-                val rw = respMsg.toWire()
                 val nu = 8 + rw.size
                 val nl = ihl + nu
                 val resp = ByteArray(nl)
-
                 System.arraycopy(buf, 0, resp, 0, ihl)
                 resp[12] = buf[16]; resp[13] = buf[17]
                 resp[14] = buf[18]; resp[15] = buf[19]
@@ -132,11 +142,11 @@ class NetboostVpnService : VpnService() {
                 resp[18] = buf[14]; resp[19] = buf[15]
                 resp[2] = (nl shr 8).toByte(); resp[3] = nl.toByte()
                 resp[10] = 0; resp[11] = 0
-                resp[udpOff] = buf[udpOff+2]; resp[udpOff+1] = buf[udpOff+3]
-                resp[udpOff+2] = buf[udpOff]; resp[udpOff+3] = buf[udpOff+1]
-                resp[udpOff+4] = (nu shr 8).toByte(); resp[udpOff+5] = nu.toByte()
-                resp[udpOff+6] = 0; resp[udpOff+7] = 0
-                System.arraycopy(rw, 0, resp, udpOff + 8, rw.size)
+                resp[uo] = buf[uo+2]; resp[uo+1] = buf[uo+3]
+                resp[uo+2] = buf[uo]; resp[uo+3] = buf[uo+1]
+                resp[uo+4] = (nu shr 8).toByte(); resp[uo+5] = nu.toByte()
+                resp[uo+6] = 0; resp[uo+7] = 0
+                System.arraycopy(rw, 0, resp, uo + 8, rw.size)
 
                 var sum = 0
                 for (i in 0..19 step 2)
@@ -147,11 +157,13 @@ class NetboostVpnService : VpnService() {
 
                 output.write(resp)
                 output.flush()
+                pktCount++
 
             } catch (_: java.net.SocketTimeoutException) {}
             catch (_: InterruptedException) { break }
-            catch (_: Exception) { if (running) Thread.sleep(50) }
+            catch (_: Exception) { if (running) try { Thread.sleep(10) } catch(_:Exception){break} }
         }
+        up.close()
     }
 
     private fun note(text: String): android.app.Notification {
@@ -161,19 +173,12 @@ class NetboostVpnService : VpnService() {
         val n = NotificationCompat.Builder(this, "n")
             .setContentTitle("Netboost").setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_search).setOngoing(true)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", pi)
-            .build()
-        try { getSystemService(NotificationManager::class.java).notify(1, n) } catch (_: Exception) {}
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", pi).build()
+        try { getSystemService(NotificationManager::class.java).notify(1, n) } catch(_: Exception) {}
         return n
     }
 
-    private class LruCache<K, V>(private val max: Int) {
-        private val map = object : LinkedHashMap<K, V>(max, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?) = size > max
-        }
-        @Synchronized fun get(k: K) = map[k]
-        @Synchronized fun put(k: K, v: V) { map[k] = v }
-    }
+    private class CacheSlot(val key: Int, val data: ByteArray)
 
     companion object {
         @Volatile var hits_ = 0
