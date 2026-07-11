@@ -26,7 +26,7 @@ class MainActivity : AppCompatActivity() {
         status = TextView(this).apply { text = "Netboost\nDNS Cache"; gravity = 1; textSize = 18f }
         btn = Button(this).apply { text = "Start"; setOnClickListener {
             if (text == "Stop") {
-                stopService(Intent(this@MainActivity, NetboostVpnService::class.java).apply { action = "STOP" })
+                stopService(Intent(this@MainActivity, NetboostVpnService::class.java))
                 setStatus(false)
             } else {
                 val i = VpnService.prepare(this@MainActivity)

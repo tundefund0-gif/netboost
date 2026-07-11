@@ -1,107 +1,133 @@
 # Netboost for Android
 
-A local DNS cache + forwarder that runs as an Android VpnService — no root required. Accelerates DNS lookups by caching responses locally and racing multiple upstream DNS servers.
+Zero-root DNS cache + forwarder as an Android VpnService. Intercepts all system DNS traffic, caches responses locally, and races two upstream servers for lowest latency.
 
 ## How it works
 
 ```
-App → System DNS resolver → TUN interface → Netboost VpnService → 1.1.1.1 (racing)
-                                              ↓                       8.8.8.8
-                                         65K-slot hash cache
-                                              ↓
-                                     Response written to TUN
-                                              ↓
-                                     System → App (sub-ms on hit)
+App → system DNS → 10.0.0.1:53 (VPN) → Netboost → hash cache → hit? return cached bytes
+                                                         miss? → race 1.1.1.1 + 8.8.8.8
+                                                                 → cache raw bytes → respond
 ```
 
-1. Creates a local VPN (VpnService) with address `10.0.0.1`
-2. Sets system DNS server to `10.0.0.1` — all DNS queries route through the TUN
-3. Reads raw IP packets from TUN fd
-4. For UDP/53 packets: extracts DNS question, checks hash cache, forwards upstream on miss
-5. Constructs response IP packet (swap src/dst, fix checksums) and writes to TUN
-6. Non-DNS traffic passes through the normal network (only `10.0.0.1` is routed through VPN)
+1. VpnService creates TUN at `10.0.0.1/24`, routes only that IP, sets system DNS to `10.0.0.1`
+2. TUN loop reads raw IP packets, filters for UDP/53, extracts DNS question
+3. Computes hash of domain name + query type, probes 65K-slot open-addressing hash cache
+4. On hit: returns cached raw DNS bytes immediately (zero parsing, zero allocation)
+5. On miss: sends to both `1.1.1.1:53` and `8.8.8.8:53` simultaneously, takes first response
+6. Constructs IP response packet (swap addrs, recompute checksum), writes to TUN
+7. Non-DNS traffic passes through untouched (only `10.0.0.1` is routed)
 
 ## Speed features
 
-- **Raw byte cache** — stores DNS response `ByteArray` directly, zero parsing on hit
-- **65,536-slot open-addressing hash table** — O(1) lookups, no GC pressure
-- **Racing upstreams** — sends query to both `1.1.1.1` and `8.8.8.8`, takes first response
-- **Reusable sockets** — upstream `DatagramSocket`s are created once with `connect()` and `protect()`
-- **No object allocation on cache hit** — no String, Message, or ByteArray copy
-- **IP checksum computed inline** — no library overhead
+- **Raw byte cache** — stores DNS response `ByteArray` directly, no dnsjava parse on hit
+- **65,536-slot open-addressing hash table** — O(1) lookups, probe limit 8
+- **Racing upstreams** — 1.1.1.1 + 8.8.8.8 in parallel, first response wins
+- **Pre-warm** — top 5 domains (google/youtube/facebook/wikipedia/amazon) cached on startup
+- **Reusable pre-connected sockets** — `connect()` + `protect()` to bypass VPN loop
+- **Zero object allocation** — no Strings, ByteArray copies, or DNS library objects on the hot path
+- **AtomicInteger counters** — thread-safe hit/miss tracking
+- **No external dependencies** — pure Android SDK + Kotlin stdlib (AppCompat only for notification)
 
 ## Source files
 
 | File | Purpose |
 |------|---------|
-| `app/src/main/java/netboost/NetboostVpnService.kt` | Core VpnService: TUN loop, cache, upstream racing, packet construction (everything in one file) |
-| `app/src/main/java/netboost/MainActivity.kt` | Simple UI: Start/Stop button, hit/miss display |
-| `app/src/main/AndroidManifest.xml` | Permissions, service declaration, activity |
-| `app/build.gradle.kts` | Build config (minSdk 26, targetSdk 34, dnsjava dependency) |
-| `app/src/main/res/` | App icon (adaptive), strings, theme |
+| `app/src/main/java/netboost/NetboostVpnService.kt` | Core VpnService: TUN loop, cache, upstream racing, packet construction (~230 lines) |
+| `app/src/main/java/netboost/MainActivity.kt` | Minimal UI: Start/Stop button with hit/miss display |
+| `app/src/main/AndroidManifest.xml` | Permissions, foreground service type, VpnService declaration |
+| `app/build.gradle.kts` | Build config (minSdk 26, targetSdk 34, no DNS library) |
+| `app/src/main/res/` | Adaptive icon, strings, theme |
 
 ## Building
 
 ```bash
-# Debug APK
 cd android
-gradle assembleDebug
+./gradlew assembleDebug
 # Output: app/build/outputs/apk/debug/app-debug.apk
 ```
+
+CI builds at [github.com/tundefund0-gif/netboost/actions](https://github.com/tundefund0-gif/netboost/actions).
 
 ## Requirements
 
 - Android 8.0+ (API 26)
 - No root required
-- Private DNS must be **Off** in Settings → Private DNS
+- **Private DNS must be Off** (Settings → Private DNS → Off)
 
-## Architecture notes for upgrades
+## Architecture details
 
-### The TUN loop (`NetboostVpnService.kt`)
+### TUN loop (`loop()`)
 
-The `loop()` function reads raw IP packets from a `FileInputStream` wrapping the TUN fd:
+Runs in a dedicated thread. Reads raw IP packets from `FileInputStream` wrapping the TUN fd:
 
 ```
-read() → parse IP header → check UDP/53 → extract DNS question bytes
-  → hash question name → lookup cache → hit? return cached bytes : miss?
-  → send to upstream sockets → take first response → cache raw bytes
-  → build response IP packet (swap addresses, fix checksum) → write to TUN
+read(buf) → parse IP header (version==4, proto==UDP) → check dst port==53
+→ hash domain name (length-prefixed labels + qtype)
+→ cache lookup (open addressing, 8 probes)
+→ hit? AtomicInteger++ → use cached ByteArray
+→ miss? AtomicInteger++ → copy wire bytes → send to both upstream sockets
+→ first DatagramSocket.receive() wins → copyOf(response)
+→ validate ANCOUNT > 0 → store in cache
+→ build response IP packet:
+    1. Copy original IP header
+    2. Swap src/dst IP addresses (bytes 12-19)
+    3. Update total length (bytes 2-3)
+    4. Zero + recompute IP checksum (bytes 10-11)
+    5. Swap UDP src/dst ports
+    6. Set UDP length, zero UDP checksum (optional in IPv4)
+    7. Copy DNS response payload
+→ write to TUN via FileOutputStream
+→ flush
 ```
 
-### Packet construction
+### Pre-warm (`prewarm()`)
 
-The response packet is built by:
-1. Copying IP header from original request
-2. Swapping source/destination IP addresses (bytes 12-19)
-3. Fixing total length field (bytes 2-3)
-4. Zeroing + recomputing IP checksum (bytes 10-11)
-5. Swapping UDP source/destination ports
-6. Replacing DNS payload with cached/upstream response
+Runs once at startup in a background thread. Sends A queries for 5 popular domains directly to `1.1.1.1:53` with correct DNS wire-format (length-prefixed labels), validates `ANCOUNT > 0`, then inserts directly into the shared cache arrays using the same hash function. Pre-warmed entries are immediately usable by the TUN loop.
 
 ### Hash cache
 
-Uses open-addressing with linear probing (8 probes max):
-- `cKeys[IntArray(65536)]` stores hash → -1 means empty slot
-- `cData[arrayOfNulls<ByteArray>(65536)]` stores raw response bytes
-- Hash is computed from domain name labels + query type (XOR)
-- On collision, probes forward up to 8 slots
+```
+cKeys: IntArray(65536)   // hash value, -1 = empty slot
+cData: arrayOfNulls(65536) // raw DNS response ByteArray
+```
+
+Open-addressing with linear probing (max 8 probes):
+- Hash = `XOR(hashLabels(name), qtype) & 0x7FFFFFFF`
+- Slot = `hash & 65535`
+- On collision: probe forward up to 8 slots, take first empty or matching hash
+- On store: write to `insertSlot` (first empty found during probe)
+- No TTL eviction — entries are overwritten when all 8 probe slots are occupied (natural LRU)
 
 ### Upstream racing
 
-Two pre-connected `DatagramSocket`s (1.1.1.1:53 and 8.8.8.8:53) with 2.5s timeout:
-- Both receive the query simultaneously
-- First to respond is used; if both time out, falls back to single retry
+Two `DatagramSocket`s pre-connected and `protect()`ed against VPN loop:
+- Both receive the same query simultaneously
+- First to respond is used; the other is discarded
+- Timeout: 2.5s each; if both time out, retry once at 5s
+- If both time out again, packet is silently dropped
 
-## To upgrade
+### IP packet construction
+
+The response IP header is built from the original query header:
+- Copy all 20 bytes of original IP header
+- Swap `ip_src <-> ip_dst`
+- Set `ip_tot_len = ihl + 8 + dns_len`
+- Zero `ip_check`, recompute over all 20 header bytes
+- UDP header: swap ports, set length to `8 + dns_len`, checksum = 0
+- Append DNS response payload
+
+## How to upgrade
 
 1. Fork/clone the repo
-2. Edit `NetboostVpnService.kt` — the main service logic is ~180 lines
+2. Edit `NetboostVpnService.kt` — the main service logic is one file
 3. Key areas for improvement:
-   - **Additional upstreams** — add more DNS servers to the race pool
-   - **DNS-over-TLS** — replace UDP sockets with SSLSocket for encrypted upstream
-   - **Metrics** — expose hit rate, latency percentiles
-   - **Per-domain stats** — track most queried domains
-   - **Cache persistence** — save hot cache to disk on shutdown
-   - **Settings activity** — configurable upstream IP, cache size, etc.
-4. Build with `gradle assembleDebug`
+   - **DNS-over-TLS** — replace `DatagramSocket` with `SSLSocket` to upstream
+   - **EDNS0 support** — add OPT record for 4096-byte responses
+   - **Cache persistence** — serialize hot cache to file on `stop()`, load on start
+   - **Per-domain metrics** — track QPS, latency per domain
+   - **Multiple upstream pools** — DNS-over-HTTPS, DoT, or custom resolvers
+   - **Settings UI** — configurable upstream IPs, cache size, logging level
+   - **IPv6** — handle AAAA queries and dual-stack
+4. Build with `./gradlew assembleDebug`
 5. Install APK on device
