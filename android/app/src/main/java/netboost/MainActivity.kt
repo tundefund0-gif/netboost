@@ -64,7 +64,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun startRefresh() {
         r = Runnable {
-            status.text = "${NetboostVpnService.hits_}h ${NetboostVpnService.misses_}m"
+            status.text = "${NetboostVpnService.hits.get()}h ${NetboostVpnService.misses.get()}m"
             h.postDelayed(r!!, 2000)
         }; h.post(r!!)
     }
