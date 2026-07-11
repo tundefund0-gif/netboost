@@ -7,13 +7,9 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
-import org.xbill.DNS.*
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
-import java.net.InetSocketAddress
+import java.net.*
 import java.util.*
 import kotlin.concurrent.thread
 
@@ -43,6 +39,7 @@ class NetboostVpnService : VpnService() {
         if (fd == null) { stopSelf(); return START_NOT_STICKY }
         running = true
         note("Ready")
+
         thread(name="t") { loop(fd!!) }
         thread(name="n") { while(running){try{note("${hits_}h ${misses_}m");Thread.sleep(3000)}catch(_:Exception){break}} }
         return START_STICKY
@@ -63,12 +60,16 @@ class NetboostVpnService : VpnService() {
         val output = FileOutputStream(fd.fileDescriptor)
         val buf = ByteArray(65535)
         val rBuf = ByteArray(4096)
-        val cache = Array<CacheSlot?>(16384) { null }
-        val up = DatagramSocket()
-        protect(up)
-        up.soTimeout = 3000
-        val upAddr = InetSocketAddress("1.1.1.1", 53)
-        var pktCount = 0L
+
+        // Cache: open-addressing hash table, stores raw DNS response bytes
+        val cKeys = IntArray(65536) { -1 }
+        val cData = arrayOfNulls<ByteArray>(65536)
+
+        // Dual upstream sockets for racing
+        val up1 = DatagramSocket(); protect(up1)
+        up1.connect(InetSocketAddress("1.1.1.1", 53)); up1.soTimeout = 2500
+        val up2 = DatagramSocket(); protect(up2)
+        up2.connect(InetSocketAddress("8.8.8.8", 53)); up2.soTimeout = 2500
 
         while (running) {
             try {
@@ -82,53 +83,63 @@ class NetboostVpnService : VpnService() {
                 if (dp != 53) continue
                 val ul = ((buf[uo+4].toInt() and 0xFF) shl 8) or (buf[uo+5].toInt() and 0xFF)
                 val dl = ul - 8; if (dl <= 12) continue
-                var qnLen = 0
-                var qi = uo + 8 + 12
+
+                // Build hash key from question name bytes
                 var hash = 0
+                var qi = uo + 8 + 12
                 while (qi < uo + 8 + dl) {
                     val l = buf[qi].toInt() and 0xFF
-                    if (l == 0) { qnLen = qi - (uo + 8) + 1; break }
-                    hash = hash * 31 + l
-                    qi++
-                    for (j in 0 until l) {
-                        val b = buf[qi + j].toInt() and 0xFF
-                        hash = hash * 31 + b
-                    }
-                    qi += l
+                    if (l == 0) break
+                    for (j in 0..l) { val b = buf[qi + j].toInt() and 0xFF; hash = hash * 31 + b }
+                    qi += 1 + l
                 }
-                if (qnLen == 0) continue
                 val qtype = ((buf[qi+1].toInt() and 0xFF) shl 8) or (buf[qi+2].toInt() and 0xFF)
-                val key = (hash xor qtype) and 0x7FFFFFFF
+                hash = hash xor qtype
+                if (hash == -1) hash = 0
+                val idx = hash and 65535
 
-                val si = key % 16384
+                // Check cache (open addressing, probe up to 8 slots)
                 var hit: ByteArray? = null
-                var ci = si
-                var emptySlot = si
+                var insertSlot = idx
                 var foundEmpty = false
-                for (j in 0 until 32) {
-                    val idx = (si + j) % 16384
-                    val s = cache[idx]
-                    if (s == null) { if (!foundEmpty) { emptySlot = idx; foundEmpty = true }; continue }
-                    if (s.key == key) { hit = s.data; ci = idx; break }
+                for (j in 0 until 8) {
+                    val s = (idx + j) and 65535
+                    val k = cKeys[s]
+                    if (k == -1) { if (!foundEmpty) { insertSlot = s; foundEmpty = true }; if (hit != null) break }
+                    if (k == hash) { hit = cData[s]; break }
                 }
-                if (hit == null && foundEmpty) ci = emptySlot
+                if (!foundEmpty) insertSlot = idx
 
                 val rw: ByteArray
                 if (hit != null) {
-                    hits_++; rw = hit
+                    hits_++
+                    rw = hit!!
                 } else {
                     misses_++
                     val wire = ByteArray(dl)
                     System.arraycopy(buf, uo + 8, wire, 0, dl)
-                    up.send(DatagramPacket(wire, wire.size, upAddr))
-                    val rp = DatagramPacket(rBuf, rBuf.size)
-                    up.receive(rp)
-                    val rd = ByteArray(rp.length)
-                    System.arraycopy(rp.data, rp.offset, rd, 0, rp.length)
-                    rw = rd
-                    val answerSec = ((rd[6].toInt() and 0xFF) shl 8) or (rd[7].toInt() and 0xFF)
-                    if (answerSec > 0) {
-                        cache[ci] = CacheSlot(key, rd)
+
+                    // Race: send on both upstreams, take first response
+                    up1.send(DatagramPacket(wire, wire.size))
+                    up2.send(DatagramPacket(wire, wire.size))
+
+                    val rp1 = DatagramPacket(rBuf, rBuf.size)
+                    val rp2 = DatagramPacket(rBuf, rBuf.size)
+                    var resp: ByteArray? = null
+
+                    try { up1.receive(rp1); val d = ByteArray(rp1.length); System.arraycopy(rp1.data, rp1.offset, d, 0, rp1.length); resp = d } catch (_: Exception) {}
+                    if (resp == null) try { up2.receive(rp2); val d = ByteArray(rp2.length); System.arraycopy(rp2.data, rp2.offset, d, 0, rp2.length); resp = d } catch (_: Exception) {}
+                    if (resp == null) { // both timed out, retry with one
+                        try { up1.receive(DatagramPacket(rBuf, rBuf.size)) } catch (_: Exception) {}
+                        try { val d = ByteArray(rp2.length); System.arraycopy(rp2.data, rp2.offset, d, 0, rp2.length); resp = d } catch (_: Exception) {}
+                    }
+                    if (resp == null) continue
+
+                    rw = resp!!
+                    // Check answer count before caching
+                    if (((rw[6].toInt() and 0xFF) shl 8 or (rw[7].toInt() and 0xFF)) > 0) {
+                        cKeys[insertSlot] = hash
+                        cData[insertSlot] = rw
                     }
                 }
 
@@ -157,13 +168,12 @@ class NetboostVpnService : VpnService() {
 
                 output.write(resp)
                 output.flush()
-                pktCount++
 
             } catch (_: java.net.SocketTimeoutException) {}
             catch (_: InterruptedException) { break }
             catch (_: Exception) { if (running) try { Thread.sleep(10) } catch(_:Exception){break} }
         }
-        up.close()
+        up1.close(); up2.close()
     }
 
     private fun note(text: String): android.app.Notification {
@@ -177,8 +187,6 @@ class NetboostVpnService : VpnService() {
         try { getSystemService(NotificationManager::class.java).notify(1, n) } catch(_: Exception) {}
         return n
     }
-
-    private class CacheSlot(val key: Int, val data: ByteArray)
 
     companion object {
         @Volatile var hits_ = 0
