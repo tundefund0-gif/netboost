@@ -154,17 +154,17 @@ class NetboostVpnService : VpnService() {
         }
     }
 
-    private fun note(text: String) {
-        try {
-            val pi = PendingIntent.getService(this, 0,
-                Intent(this, NetboostVpnService::class.java).apply { action = "S" },
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-            NotificationCompat.Builder(this, "n")
-                .setContentTitle("Netboost").setContentText(text)
-                .setSmallIcon(android.R.drawable.ic_menu_search).setOngoing(true)
-                .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", pi)
-                .build().let { getSystemService(NotificationManager::class.java).notify(1, it) }
-        } catch (_: Exception) {}
+    private fun note(text: String): android.app.Notification {
+        val pi = PendingIntent.getService(this, 0,
+            Intent(this, NetboostVpnService::class.java).apply { action = "S" },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val n = NotificationCompat.Builder(this, "n")
+            .setContentTitle("Netboost").setContentText(text)
+            .setSmallIcon(android.R.drawable.ic_menu_search).setOngoing(true)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", pi)
+            .build()
+        try { getSystemService(NotificationManager::class.java).notify(1, n) } catch (_: Exception) {}
+        return n
     }
 
     private class LruCache<K, V>(private val max: Int) {
